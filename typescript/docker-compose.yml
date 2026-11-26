@@ -1,0 +1,72 @@
+# A shop that resends and a payments service that charges once. TEST_HOOKS=on opens the fault switches and the read-only views
+# the end-to-end specs use; leave it off in production.
+name: essential-idempotency-key-typescript
+
+x-service: &service
+  build:
+    context: .
+  image: essential-idempotency-key-typescript:local
+  # restart: always brings payments back after CRASH_AFTER kills it; the shop's resend then finds a clean slate.
+  restart: always
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: postgres
+    ports:
+      - "${PG_PORT:-5452}:5432"
+    volumes:
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  shop:
+    <<: *service
+    command: ["node", "dist/shop/main.js"]
+    ports:
+      - "${SHOP_PORT:-4231}:4231"
+    environment:
+      TEST_HOOKS: "on"
+      PORT: "4231"
+      DATABASE_URL: postgres://shop:shop@postgres:5432/shop
+      PAYMENTS_URL: http://payments:4232
+      # The caller: wait 1 s for an answer, at most 4 attempts, pauses of 1 s, 2 s, 4 s (plus jitter), give up after 2 minutes.
+      READ_TIMEOUT_MS: "1000"
+      MAX_ATTEMPTS: "4"
+      BACKOFF_BASE_MS: "1000"
+      PAYMENT_DEADLINE_MS: "120000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payments:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4231/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  payments:
+    <<: *service
+    command: ["node", "dist/payments/main.js"]
+    ports:
+      - "${PAYMENTS_PORT:-4232}:4232"
+    environment:
+      TEST_HOOKS: "on"
+      PORT: "4232"
+      DATABASE_URL: postgres://shop:shop@postgres:5432/payments
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4232/health || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
